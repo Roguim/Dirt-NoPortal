@@ -1,11 +1,11 @@
 /*
- * Copyright (C) 2018-2022 Zerthick
+ * Copyright (C) 2018  Zerthick
  *
  * This file is part of NoPortal.
  *
  * NoPortal is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
+ * the Free Software Foundation, either version 2 of the License, or
  * (at your option) any later version.
  *
  * NoPortal is distributed in the hope that it will be useful,
@@ -14,130 +14,129 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with NoSleep.  If not, see <http://www.gnu.org/licenses/>.
+ * along with NoPortal.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package io.github.zerthick.noportal;
 
 import com.google.inject.Inject;
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
-import org.apache.logging.log4j.Logger;
-import org.spongepowered.api.block.BlockState;
+import ninja.leaping.configurate.ConfigurationNode;
+import ninja.leaping.configurate.commented.CommentedConfigurationNode;
+import ninja.leaping.configurate.hocon.HoconConfigurationLoader;
+import ninja.leaping.configurate.loader.ConfigurationLoader;
+import org.slf4j.Logger;
+import org.spongepowered.api.block.BlockSnapshot;
 import org.spongepowered.api.block.BlockTypes;
-import org.spongepowered.api.block.transaction.BlockTransaction;
 import org.spongepowered.api.config.DefaultConfig;
-import org.spongepowered.api.entity.living.player.server.ServerPlayer;
+import org.spongepowered.api.data.Transaction;
+import org.spongepowered.api.entity.living.player.Player;
 import org.spongepowered.api.event.Listener;
 import org.spongepowered.api.event.block.ChangeBlockEvent;
 import org.spongepowered.api.event.block.CollideBlockEvent;
-import org.spongepowered.api.event.filter.Getter;
 import org.spongepowered.api.event.filter.cause.Root;
-import org.spongepowered.api.event.lifecycle.ConstructPluginEvent;
-import org.spongepowered.configurate.CommentedConfigurationNode;
-import org.spongepowered.configurate.ConfigurateException;
-import org.spongepowered.configurate.ConfigurationNode;
-import org.spongepowered.configurate.hocon.HoconConfigurationLoader;
-import org.spongepowered.configurate.loader.ConfigurationLoader;
-import org.spongepowered.plugin.PluginContainer;
-import org.spongepowered.plugin.builtin.jvm.Plugin;
+import org.spongepowered.api.event.game.state.GameStartedServerEvent;
+import org.spongepowered.api.plugin.Plugin;
+import org.spongepowered.api.plugin.PluginContainer;
+import org.spongepowered.api.text.Text;
+import org.spongepowered.api.text.format.TextColors;
+import org.spongepowered.api.text.serializer.TextSerializers;
 
-import java.io.IOException;
-import java.net.URI;
-import java.nio.file.Files;
+import java.io.*;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Optional;
 
-@Plugin("noportal")
+@Plugin(
+        id = "noportal",
+        name = "NoPortal",
+        description = "A simple plugin to prevent creating Nether Portals.",
+        authors = {
+                "Zerthick"
+        }
+)
 public class NoPortal {
 
-    private final PluginContainer container;
-    private final Logger logger;
+    @Inject
+    private Logger logger;
+
+    @Inject
+    private PluginContainer instance;
+
     @Inject
     @DefaultConfig(sharedRoot = true)
-    private Path configPath;
-    private Component permissionText;
-
-    @Inject
-    NoPortal(final PluginContainer container, final Logger logger) {
-        this.container = container;
-        this.logger = logger;
-    }
+    private Path config;
+    private Text permissionText;
 
     @Listener
-    public void onConstructPlugin(final ConstructPluginEvent event) {
+    public void onServerStart(GameStartedServerEvent event) {
+
         // Log Start Up to Console
         logger.info(
-                container.metadata().name().orElse("Unknown Plugin") + " version " + container.metadata().version()
+                instance.getName() + " version " + instance.getVersion().orElse("unknown")
                         + " enabled!");
 
-        // Load permission text from config
-        Optional<ConfigurationNode> configOptional = loadConfig();
-
-        if (configOptional.isPresent()) {
-            ConfigurationNode config = configOptional.get();
-            permissionText = LegacyComponentSerializer.legacyAmpersand().deserialize(config.node("NoPortalNetherPortalCreationPermissionError").getString("Unable to load NoPortal permission message!"));
-        } else {
-            logger.error("Unable to load configuration file!");
-        }
+        loadConfig();
     }
 
     @Listener
-    public void onPortalCreate(ChangeBlockEvent.All event, @Getter("transactions") List<BlockTransaction> transactions) {
+    public void onPortalCreate(ChangeBlockEvent.Place event) {
 
-        for (BlockTransaction transaction : transactions) {
-            if (transaction.finalReplacement().state().type().equals(BlockTypes.NETHER_PORTAL.get())) {
+        boolean containsPortalBlocks = false;
 
-                Optional<ServerPlayer> playerOptional = event.cause().first(ServerPlayer.class);
-
-                if (playerOptional.isPresent()) {
-                    ServerPlayer player = playerOptional.get();
-                    if (!player.hasPermission("noportal.netherportal.create")) {
-                        player.sendMessage(permissionText);
-                        event.invalidateAll();
-                    }
-                } else {
-                    event.invalidateAll();
-                }
+        for (Transaction<BlockSnapshot> transaction : event.getTransactions()) {
+            if (transaction.getFinal().getState().getType().equals(BlockTypes.PORTAL)) {
+                containsPortalBlocks = true;
                 break;
             }
         }
+
+        if (containsPortalBlocks) {
+            Optional<Player> playerOptional = event.getCause().first(Player.class);
+
+            if (playerOptional.isPresent()) {
+                Player player = playerOptional.get();
+
+                if (!player.hasPermission("noportal.create")) {
+                    player.sendMessage(permissionText);
+                    event.setCancelled(true);
+                }
+            } else {
+                event.setCancelled(true);
+            }
+        }
     }
 
     @Listener
-    public void onPortalEnter(CollideBlockEvent event, @Root ServerPlayer player, @Getter("targetBlock") BlockState targetBlock) {
+    public void onPortalEnter(CollideBlockEvent event, @Root Player player) {
 
-        if (targetBlock.type().equals(BlockTypes.NETHER_PORTAL.get())) {
-            if (!player.hasPermission("noportal.netherportal.enter")) {
-                event.setCancelled(true);
-            }
-        }
+        if (event.getTargetBlock().getType().equals(BlockTypes.PORTAL)) {
 
-        if (targetBlock.type().equals(BlockTypes.END_PORTAL.get())) {
-            if (!player.hasPermission("noportal.endportal.enter")) {
+            if (!player.hasPermission("noportal.enter")) {
                 event.setCancelled(true);
             }
         }
     }
 
-    private Optional<ConfigurationNode> loadConfig() {
-        if (!configPath.toFile().exists()) {
+    private void loadConfig() {
+        if (!config.toFile().exists()) {
             // Create config if not exists
-            container.openResource(URI.create("default.conf")).ifPresent(r -> {
-                try {
-                    Files.copy(r, configPath);
-                } catch (IOException e) {
-                    logger.error(e.getMessage());
+            try {
+                InputStream in = this.getClass().getResourceAsStream("/config.conf");
+                OutputStream out = new FileOutputStream(config.toFile());
+                byte[] buff = new byte[1024];
+                int len;
+                while ((len = in.read(buff)) > 0) {
+                    out.write(buff, 0, len);
                 }
-            });
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
         }
         try {
-            ConfigurationLoader<CommentedConfigurationNode> loader = HoconConfigurationLoader.builder().path(configPath).build();
-            return Optional.of(loader.load());
-        } catch (ConfigurateException e) {
-            logger.error(e.getMessage());
+            ConfigurationLoader<CommentedConfigurationNode> loader = HoconConfigurationLoader.builder().setPath(config).build();
+            ConfigurationNode rootNode = loader.load().getNode();
+            permissionText = TextSerializers.FORMATTING_CODE.deserialize(rootNode.getNode("NoPortalCreationPermissionError").getString());
+        } catch (IOException e) {
+            e.printStackTrace();
         }
-        return Optional.empty();
     }
 }
